@@ -34,8 +34,12 @@ that whoever deploys the plugin knows what they are agreeing to and to whom.
 
     Not redistributed here. Obtaining them means accepting those terms, and the official
     downloader asks for that acceptance interactively on purpose. This project therefore
-    does not download them and does not answer that prompt: the operator runs the
-    downloader and accepts in person.
+    does not download them and does not answer that prompt on anyone's behalf.
+
+    bootstrap.py relays an acceptance the operator gives in person: it prints the official
+    text, requires the phrase 「同意して取得する」 to be typed at a terminal, then passes that
+    answer to the official downloader and records the digest of the text it showed, plus the
+    operator and the timestamp, in <core>/.consent.json. The plugin never imports it.
 
     In summary — the terms permit commercial and non-commercial use and allow embedding
     the models in an application, provided that:

@@ -46,12 +46,13 @@ their licence, so this plugin ships no dependency and walks you through both.
 pip install https://github.com/VOICEVOX/voicevox_core/releases/download/0.17.1/\
 voicevox_core-0.17.1-cp310-abi3-manylinux_2_34_x86_64.whl
 
-# 2. ONNX Runtime, the Open JTalk dictionary and at least one voice model (~180 MB)
-#    The downloader asks you to accept the 「VOICEVOX 音声モデル 利用規約」 — that has to be you,
-#    not the plugin, so it is deliberately not automated.
-curl -LO https://github.com/VOICEVOX/voicevox_core/releases/download/0.17.1/download-linux-x64
-chmod +x download-linux-x64
-./download-linux-x64 --only onnxruntime --only dict --only models -o /opt/voicevox_core
+# 2. ONNX Runtime, the Open JTalk dictionary and voice models (~180 MB)
+#    Read the terms first — this downloads nothing:
+python bootstrap.py --show-terms --core ~/voicevox_core
+#    Then, from a real terminal, accept them and fetch:
+python bootstrap.py --accept --core ~/voicevox_core
+#    It prints the official terms, requires you to type 「同意して取得する」, relays your answer
+#    to the official downloader, and records what was accepted in <core>/.consent.json.
 
 # 3. the plugin
 git clone https://github.com/0ppaikoa/hermes-plugin-voicevox-tts /tmp/hpvv
@@ -121,6 +122,12 @@ over:
    prompt, never pipes a `y` into it, and never downloads the models — it only tells you the
    command when the directory is empty.
 2. **Crediting generated audio**, e.g. `VOICEVOX:ずんだもん`, whenever you publish it.
+
+`bootstrap.py` keeps both of those yours. It is not imported by the plugin, it refuses to run
+`--accept` without a terminal, it shows the official terms text before anything is fetched, it
+requires the phrase `同意して取得する` typed by hand, and it writes `<core>/.consent.json` with
+the digest of the exact terms text it showed you. Re-run `python bootstrap.py` at any time to see
+what is installed and what was accepted.
 
 ## Design notes
 
