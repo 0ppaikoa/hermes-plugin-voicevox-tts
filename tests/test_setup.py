@@ -20,13 +20,18 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import bootstrap  # noqa: E402
+from _load import install  # noqa: E402
+
+install()
+
 import hermes_voicevox as vv  # noqa: E402
-from hermes_voicevox import setup  # noqa: E402
+from hermes_voicevox import provisioning as setup  # noqa: E402
 
 TERMS_SAMPLE = """# VOICEVOX 音声モデル 利用規約
 ## 許諾内容
@@ -137,25 +142,39 @@ class TestShowTerms(Base):
 
 
 class TestCli(Base):
-    def test_no_arguments_reports_missing_data(self):
+    """`hermes voicevox status|terms|install` — the documented CLI surface."""
+
+    def args(self, action, **extra):
+        values = {"action": action, "core": self.core, "approved_by": "", "approval_ref": ""}
+        values.update(extra)
+        return SimpleNamespace(**values)
+
+    def test_status_reports_missing_data(self):
         buffer = io.StringIO()
         with redirect_stdout(buffer):
-            self.assertEqual(bootstrap.main(["--core", self.core]), 2)
-        self.assertIn("--show-terms", buffer.getvalue())
+            self.assertEqual(vv.handle_cli(self.args("status")), 2)
+        self.assertIn("data_present", buffer.getvalue())
 
-    def test_accept_without_authorisation_exits_3(self):
-        with mock.patch.object(bootstrap.setup, "ensure_downloader", lambda *a, **k: "dl"), \
-             mock.patch.object(sys.stdin, "isatty", lambda: False), \
-             redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            self.assertEqual(bootstrap.main(["--core", self.core, "--accept"]), 3)
-
-    def test_accept_with_authorisation_succeeds(self):
-        with mock.patch.object(bootstrap.setup, "run_downloader", self.runner()), \
-             mock.patch.object(bootstrap.setup, "ensure_downloader", lambda *a, **k: "dl"), \
+    def test_terms_downloads_nothing(self):
+        seen: list[str] = []
+        with mock.patch.object(setup, "run_downloader", self.runner(seen=seen)), \
+             mock.patch.object(setup, "ensure_downloader", lambda *a, **k: "dl"), \
              redirect_stdout(io.StringIO()):
-            code = bootstrap.main(["--core", self.core, "--accept",
-                                   "--approved-by", "yuki-js",
-                                   "--approval-ref", "chat 2026-11-06: 'go'"])
+            self.assertEqual(vv.handle_cli(self.args("terms")), 0)
+        self.assertEqual(seen, ["n"])
+
+    def test_install_without_authorisation_exits_3(self):
+        with mock.patch.object(setup, "ensure_downloader", lambda *a, **k: "dl"), \
+             redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(vv.handle_cli(self.args("install")), 3)
+        self.assertFalse(os.path.exists(os.path.join(self.core, ".consent.json")))
+
+    def test_install_with_authorisation_succeeds(self):
+        with mock.patch.object(setup, "run_downloader", self.runner()), \
+             mock.patch.object(setup, "ensure_downloader", lambda *a, **k: "dl"), \
+             redirect_stdout(io.StringIO()):
+            code = vv.handle_cli(self.args("install", approved_by="yuki-js",
+                                           approval_ref="chat 2026-11-06: 'go'"))
         self.assertEqual(code, 0)
         self.assertTrue(os.path.exists(os.path.join(self.core, ".consent.json")))
 
@@ -219,10 +238,15 @@ class TestRegistration(Base):
             def register_tool(self, **kwargs):
                 calls["tool"] = kwargs
 
+            def register_cli_command(self, **kwargs):
+                calls["cli"] = kwargs
+
         registry._reset_for_tests()
         try:
             vv.register(Ctx())
             self.assertEqual(calls["tool"]["name"], "voicevox_setup")
+            self.assertEqual(calls["cli"]["name"], "voicevox")
+            self.assertIs(calls["cli"]["handler_fn"], vv.handle_cli)
             self.assertIn("download", calls["tool"]["schema"]["parameters"]["properties"]["action"]["enum"])
             self.assertIsNotNone(registry.get_provider("voicevox"))
         finally:

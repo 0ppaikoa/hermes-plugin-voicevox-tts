@@ -14,10 +14,10 @@ running, in-process VOICEVOX CORE — no engine process, no HTTP, no port.
 
 Setup (the wheel is not on PyPI, and the models need a manual licence click):
 
-    pip install https://github.com/VOICEVOX/voicevox_core/releases/download/0.17.1/\
-voicevox_core-0.17.1-cp310-abi3-manylinux_2_34_x86_64.whl
-    ./download-linux-x64 --only onnxruntime --only dict --only models -o /opt/voicevox_core
-    hermes plugins enable voicevox
+    hermes plugins install 0ppaikoa/hermes-plugin-voicevox-tts --enable
+    pip install <the voicevox_core wheel from the VOICEVOX release page>
+    hermes voicevox terms     # read the licence
+    hermes voicevox install --approved-by me --approval-ref "..."
 
 Generated audio must credit VOICEVOX (e.g. ``VOICEVOX:ずんだもん``) — that is the voice models'
 licence, not this plugin's.
@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 from typing import Any, Optional
 
 try:  # Hermes core
@@ -49,7 +50,7 @@ except Exception:  # pragma: no cover - lets the test suite import without Herme
             raise NotImplementedError
 
 
-from . import setup as _setup  # noqa: E402
+from . import provisioning as _provisioning  # noqa: E402
 from .core import (  # noqa: E402
     ENV_CORE_DIR,
     ConfigSource,
@@ -218,8 +219,7 @@ _SETUP_SCHEMA: dict[str, Any] = {
         "text was accepted; `show_terms` prints the official terms and downloads nothing; "
         "`download` fetches the data. Call `download` ONLY after the operator has explicitly "
         "agreed in the conversation, and pass their exact words as approval_ref — never invent "
-        "one. This tool exists because the official downloader's prompt asks a human, and the "
-        "human's answer arrives in chat."
+        "one. The downloader's prompt asks a human, and the human's answer arrives in chat."
     ),
     "parameters": {
         "type": "object",
@@ -242,7 +242,7 @@ def _core_dir(override: Any = None) -> str:
     if isinstance(override, str) and override.strip():
         return os.path.abspath(os.path.expanduser(override.strip()))
     configured = ConfigSource().core_dir()
-    return configured or os.path.abspath(os.path.expanduser(_setup.DEFAULT_CORE))
+    return configured or os.path.abspath(os.path.expanduser(_provisioning.DEFAULT_CORE))
 
 
 def _handle_setup(args: dict[str, Any], **_kw: Any) -> str:
@@ -254,24 +254,63 @@ def _handle_setup(args: dict[str, Any], **_kw: Any) -> str:
 
     try:
         if action == "status":
-            return envelope(True, **_setup.status(core_dir))
+            return envelope(True, **_provisioning.status(core_dir))
         if action == "show_terms":
-            text = _setup.show_terms(_setup.ensure_downloader(), core_dir)
+            text = _provisioning.show_terms(_provisioning.ensure_downloader(), core_dir)
             return envelope(True, core=core_dir, terms=text, downloaded=False)
         if action == "download":
-            result = _setup.download(
+            result = _provisioning.download(
                 core_dir,
                 approved_by=str(args.get("approved_by") or ""),
                 approval_ref=str(args.get("approval_ref") or ""),
             )
             return envelope(True, **result)
         return envelope(False, error=f"unknown action {action!r}; expected status|show_terms|download")
-    except _setup.SetupRefused as exc:
+    except _provisioning.SetupRefused as exc:
         return envelope(False, error=str(exc),
                         needs=["approved_by", "approval_ref"],
                         hint="Ask the operator in the conversation first, then pass their words.")
     except Exception as exc:
         return envelope(False, error=f"{type(exc).__name__}: {exc}")
+
+
+def setup_cli(parser) -> None:
+    """``hermes voicevox [status|terms|install]`` — same code as the tool, for a terminal."""
+    parser.add_argument("action", nargs="?", default="status",
+                        choices=["status", "terms", "install"])
+    parser.add_argument("--core", help="CORE data directory (default: tts.voicevox.core)")
+    parser.add_argument("--approved-by", default="", help="who authorised the download")
+    parser.add_argument("--approval-ref", default="", help="where and when they authorised it")
+
+
+def handle_cli(args) -> int:
+    core_dir = _core_dir(getattr(args, "core", None))
+    action = getattr(args, "action", "status") or "status"
+
+    if action == "status":
+        state = _provisioning.status(core_dir)
+        print(json.dumps(state, ensure_ascii=False, indent=2))
+        return 0 if state["data_present"] else 2
+
+    if action == "terms":
+        print(_provisioning.show_terms(_provisioning.ensure_downloader(), core_dir))
+        print("\n何も取得していません。")
+        return 0
+
+    try:
+        result = _provisioning.download(
+            core_dir,
+            approved_by=getattr(args, "approved_by", "") or "",
+            approval_ref=getattr(args, "approval_ref", "") or "",
+        )
+    except _provisioning.SetupRefused as exc:
+        print(f"拒否: {exc}", file=sys.stderr)
+        return 3
+    except Exception as exc:
+        print(f"失敗: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 3
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
 
 
 def register(ctx) -> None:
@@ -289,3 +328,12 @@ def register(ctx) -> None:
         # The provider is the point; the setup tool is a convenience. A host that refuses the
         # tool must still get speech, so this never propagates.
         logger.warning("voicevox_setup tool was not registered: %s", exc)
+    try:
+        ctx.register_cli_command(
+            name="voicevox",
+            help="VOICEVOX CORE data: status, terms, install",
+            setup_fn=setup_cli,
+            handler_fn=handle_cli,
+        )
+    except Exception as exc:
+        logger.warning("hermes voicevox command was not registered: %s", exc)

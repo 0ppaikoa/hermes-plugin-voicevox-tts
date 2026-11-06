@@ -20,6 +20,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import fake_core  # noqa: E402
+from _load import install  # noqa: E402
+
+install()  # the repo root is the plugin, imported the way Hermes imports it
+
 import hermes_voicevox as vv  # noqa: E402
 from hermes_voicevox import core  # noqa: E402
 

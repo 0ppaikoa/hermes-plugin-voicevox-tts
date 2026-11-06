@@ -38,30 +38,23 @@ would add little. This is the other half.
 
 ## Install
 
-VOICEVOX CORE's Python wheel is **not on PyPI**, and the voice models require clicking through
-their licence, so this plugin ships no dependency and walks you through both.
+Three things: the CORE wheel (not a plugin matter), the plugin itself, and the data.
 
 ```bash
-# 1. the wheel (pick your platform from the release page)
+# 1. the wheel — VOICEVOX CORE is not on PyPI
 pip install https://github.com/VOICEVOX/voicevox_core/releases/download/0.17.1/\
 voicevox_core-0.17.1-cp310-abi3-manylinux_2_34_x86_64.whl
 
-# 2. ONNX Runtime, the Open JTalk dictionary and voice models (~180 MB)
-#    Read the terms first — this downloads nothing:
-python bootstrap.py --show-terms --core ~/voicevox_core
-#    Then, from a real terminal, accept them and fetch:
-python bootstrap.py --accept --core ~/voicevox_core
-#    It prints the official terms, requires you to type 「同意して取得する」, relays your answer
-#    to the official downloader, and records what was accepted in <core>/.consent.json.
+# 2. the plugin, through the installer every Hermes plugin uses
+hermes plugins install 0ppaikoa/hermes-plugin-voicevox-tts --enable
 
-# 3. the plugin
-git clone https://github.com/0ppaikoa/hermes-plugin-voicevox-tts /tmp/hpvv
-cp -r /tmp/hpvv/hermes_voicevox ~/.hermes/plugins/voicevox
-hermes plugins enable voicevox        # plugins are opt-in
+# 3. point it at a data directory (or bring one — see the next section)
+hermes config set tts.provider voicevox
+hermes config set tts.voicevox.core ~/voicevox_core
+hermes gateway restart
 ```
 
-Then set `tts.provider: voicevox` and `tts.voicevox.core` in `config.yaml`, and restart the
-gateway. `hermes plugins enable` alone does nothing until the provider is selected.
+`hermes plugins update` and `hermes plugins remove` work as they do for any other plugin.
 
 ## First run, in a conversation
 
@@ -137,10 +130,9 @@ over:
    command when the directory is empty.
 2. **Crediting generated audio**, e.g. `VOICEVOX:ずんだもん`, whenever you publish it.
 
-`bootstrap.py` keeps both of those yours. It is not imported by the plugin, it always shows the
-official terms text before anything is fetched, and it writes `<core>/.consent.json` with the
-digest of the exact text it showed you. Re-run `python bootstrap.py` at any time to see what is
-installed and what was accepted.
+The plugin keeps both of those yours. It always shows the official terms text before anything is
+fetched, and it writes `<core>/.consent.json` with the digest of the exact text it showed you.
+`hermes voicevox status` reports what is installed and what was accepted.
 
 It accepts on two channels, and records which one was used:
 
