@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-voicevox"
+version = "0.1.0"
+description = "VOICEVOX CORE (in-process) as a Hermes Agent TTS provider"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "AokiApp Inc." }]
+keywords = ["hermes", "hermes-agent", "tts", "voicevox", "zundamon", "japanese"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+# Deliberately empty: voicevox_core is not on PyPI. Install its wheel manually (see README)
+# so a failed auto-install can never take the plugin's import down with it.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/0ppaikoa/hermes-plugin-voicevox-tts"
+
+[project.entry-points."hermes_agent.plugins"]
+voicevox = "hermes_voicevox"
+
+[tool.setuptools]
+packages = ["hermes_voicevox"]
+
+[tool.setuptools.package-data]
+hermes_voicevox = ["plugin.yaml"]

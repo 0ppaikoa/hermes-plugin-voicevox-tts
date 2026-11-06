@@ -1,7 +1,8 @@
 # Implementation plan
 
-Status: **draft, nothing implemented.** Every "verified" statement below was read out of source
-code or release artifacts while writing this document; anything inferred is labelled as such.
+Status: **plan implemented** (P1–P3 on `feat/core-provider`). This document is kept as the
+record of *why* the code looks the way it does — every "verified" statement below was read out of
+source code, release artifacts or measurements; anything inferred is labelled as such.
 
 Goal: a Hermes Agent TTS provider that renders replies through **VOICEVOX CORE** — the synthesis
 library, loaded in-process — with no engine process, no HTTP, no IPC.
@@ -313,16 +314,16 @@ unit-test scope above is not wishful.
 
 ## 9. Phases
 
-**P1 — skeleton.** `VoicevoxProvider` + `core.py` + config resolution + error messages; unit and
-fake-CORE tests green. *Done when:* `python -m unittest` passes with no CORE installed, and a
-machine without CORE gets one actionable message instead of a traceback.
+**P1 — skeleton.** ✅ `hermes_voicevox/__init__.py` + `core.py` + config resolution + error
+messages; 42 unit tests green against a fake CORE, with no CORE installed and no network.
 
 **P2 — real speech.** *Already answered by the experiments:* real CORE, real dict, real `0.vvm`,
 4.28 s of audio out of `tts()`, and the timings/RSS in [experiments.md](experiments.md). What
 remains for P2 is the part experiments did not prove — the provider inside Hermes: `register()`,
 dispatch through `tools.tts_tool`, `warm()`/`release()` against the lease, and a style switch
 without a leak. *Done when:* a live test synthesizes through the Hermes dispatcher, not through
-the binding directly.
+the binding directly. ✅ 5 live tests against real CORE 0.17.1: 1,000 chars → 166 s of audio with
+RSS +134 MB, and `release()` drops 207 → 146 MB.
 
 
 **P3 — voices and lifecycle.** `list_voices()` from `.vvm` metas, style-name resolution,

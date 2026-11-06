@@ -1,48 +1,117 @@
 # hermes-plugin-voicevox-tts
 
-**Status: planning. This repository contains the design, not an implementation yet.**
-
-A [Hermes Agent](https://github.com/NousResearch/hermes-agent) TTS provider that speaks through
-[VOICEVOX CORE](https://github.com/VOICEVOX/voicevox_core) — the synthesis library, loaded
+A [Hermes Agent](https://github.com/NousResearch/hermes-agent) text-to-speech provider that speaks
+through [VOICEVOX CORE](https://github.com/VOICEVOX/voicevox_core) — the synthesis library, loaded
 in-process.
 
-Not the VOICEVOX **editor**. Not the VOICEVOX **ENGINE** either: no HTTP server, no extra
-process, no IPC, no port to manage. The plugin is a module that Hermes imports, and speech comes
-back as bytes.
+Not the VOICEVOX **editor**. Not the VOICEVOX **ENGINE** either: no HTTP server, no second process,
+no IPC, no port to manage. The plugin is a module Hermes imports, and speech comes back as bytes.
 
 ```yaml
-# the intended end state, not yet implemented
 tts:
   provider: voicevox
   voicevox:
-    core: /opt/voicevox_core        # CORE data dir (onnxruntime, dict, models)
-    speaker: 3                      # ずんだもん（ノーマル）
+    core: /opt/voicevox_core      # holds onnxruntime/, dict/, models/
+    speaker: 3                    # ずんだもん（ノーマル）; names work too
+    cpu_num_threads: 4
+    idle_unload_seconds: 300
 ```
 
 ## Why CORE and not the engine
 
-| | VOICEVOX ENGINE (HTTP) | VOICEVOX CORE (in-process) |
+| | VOICEVOX ENGINE (HTTP) | VOICEVOX CORE (in-process, this plugin) |
 |---|---|---|
 | Extra process | yes, must be running | none |
 | Port / IPC | `127.0.0.1:50021` | none |
-| Startup | engine boot + model load | model load on first use, unload when idle |
-| Config surface | URL, retries, engine liveness | a directory path |
-| Failure mode | engine offline ⇒ no speech | import/model error ⇒ one clear message |
+| Startup | engine boot + model load | model load on first use, dropped when idle |
+| Config surface | URL, retries, liveness | a directory path |
+| Failure mode | engine offline ⇒ nothing to say | one actionable error |
 
-Hermes already ships a documented `type: command` provider path for the engine, so an
-engine-shaped plugin adds little. CORE is the interesting one.
+Hermes already documents a `type: command` provider for the engine, so an engine-shaped plugin
+would add little. This is the other half.
 
-## Plan
+## Requirements
 
-See [docs/plan.md](docs/plan.md) for the implementation plan: architecture, the CORE API surface
-this depends on, the Hermes plugin contract it has to satisfy, phases, testing strategy, and the
-open questions.
+- Python 3.10+ (the wheel is `cp310-abi3`)
+- Linux or macOS, glibc ≥ 2.34 on Linux (`manylinux_2_34`)
+- ffmpeg **optional** — without it replies arrive as audio files instead of voice bubbles
 
-## Licence and credit
+## Install
 
-The plugin itself will be MIT.
+VOICEVOX CORE's Python wheel is **not on PyPI**, and the voice models require clicking through
+their licence, so this plugin ships no dependency and walks you through both.
 
-VOICEVOX CORE is MIT (0.16 and later). The **voice models** are not: they ship under the
-「VOICEVOX 音声モデル 利用規約」, which permits commercial and non-commercial use *provided*
-that generated audio is credited — e.g. `VOICEVOX:ずんだもん`. The plugin will carry that
-obligation in its README and refuse to hide it; audio it produces is the user's to credit.
+```bash
+# 1. the wheel (pick your platform from the release page)
+pip install https://github.com/VOICEVOX/voicevox_core/releases/download/0.17.1/\
+voicevox_core-0.17.1-cp310-abi3-manylinux_2_34_x86_64.whl
+
+# 2. ONNX Runtime, the Open JTalk dictionary and at least one voice model (~180 MB)
+#    The downloader asks you to accept the 「VOICEVOX 音声モデル 利用規約」 — that has to be you,
+#    not the plugin, so it is deliberately not automated.
+curl -LO https://github.com/VOICEVOX/voicevox_core/releases/download/0.17.1/download-linux-x64
+chmod +x download-linux-x64
+./download-linux-x64 --only onnxruntime --only dict --only models -o /opt/voicevox_core
+
+# 3. the plugin
+git clone https://github.com/0ppaikoa/hermes-plugin-voicevox-tts /tmp/hpvv
+cp -r /tmp/hpvv/hermes_voicevox ~/.hermes/plugins/voicevox
+hermes plugins enable voicevox        # plugins are opt-in
+```
+
+Then set `tts.provider: voicevox` and `tts.voicevox.core` in `config.yaml`, and restart the
+gateway. `hermes plugins enable` alone does nothing until the provider is selected.
+
+## Voices
+
+`speaker` takes an id or a name; `tts.voice` (or a per-call `voice`) overrides it:
+
+```yaml
+tts:
+  voice: ずんだもん（あまあま）      # or "36", or 四国めたん
+```
+
+`hermes tools` lists every style found in your `.vvm` files — read from the model metadata, with
+no ONNX Runtime loaded (0.3 ms for two files).
+
+Which styles you get depends on the models you downloaded: `0.vvm` carries 四国めたん ×4,
+ずんだもん ×4, 春日部つむぎ and 雨晴はう; `1.vvm` adds 冥鳴ひまり.
+
+## Memory: why replies are synthesised in pieces
+
+One CORE call costs roughly **23–34 MB of resident memory per second of generated audio**, and the
+memory is never returned inside the process. Measured in an isolated 7 GiB Job:
+
+| one call per reply | | | sentence-at-a-time | | |
+|---|---|---|---|---|---|
+| 100 chars | 18 s | 618 MB | 400 chars | 67.6 s | 310 MB |
+| 200 chars | 36 s | 1,496 MB | 800 chars | 134.8 s | 310 MB |
+| 400 chars | 71.5 s | 3,908 MB | 1,600 chars | 269.5 s | 310 MB |
+| 800 chars | — | **OOMKilled** | 4,000 chars | 673.2 s | 310 MB |
+
+So the plugin splits on `。！？` (and hard-splits long clauses) and concatenates the WAVs, keeping
+each piece ≤ 40 characters ≈ 200 MB. Hermes' own splitter keys on `(?<=[.!?])\s+`, which never
+fires for Japanese, so this is the only splitting that happens — and without it a long reply takes
+the gateway down.
+
+Verified live: a 1,000-character reply (166 s of audio) moved RSS by **+134 MB**.
+
+## What it does not do (v1)
+
+- No PCM streaming: `synthesize()` only, so speech starts when the reply is rendered. CORE's
+  `streaming_synthesis()` makes it feasible later (it yields the 44-byte RIFF header then PCM at
+  24 kHz).
+- No custom user dictionary, no singing synthesis, no GPU tuning.
+- One model resident at a time; switching character reloads (~0.7 s).
+
+## Credit
+
+Generated audio must credit VOICEVOX — e.g. `VOICEVOX:ずんだもん` — under the voice models'
+terms. That is your obligation when you publish the audio; the plugin only synthesises it.
+
+The plugin is MIT. VOICEVOX CORE itself is MIT from 0.16 onward.
+
+## Design notes
+
+[docs/plan.md](docs/plan.md) and [docs/experiments.md](docs/experiments.md) carry the measured
+reasoning behind each decision, including the ones the measurements reversed.
