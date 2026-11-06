@@ -36,10 +36,12 @@ that whoever deploys the plugin knows what they are agreeing to and to whom.
     downloader asks for that acceptance interactively on purpose. This project therefore
     does not download them and does not answer that prompt on anyone's behalf.
 
-    bootstrap.py relays an acceptance the operator gives in person: it prints the official
-    text, requires the phrase 「同意して取得する」 to be typed at a terminal, then passes that
-    answer to the official downloader and records the digest of the text it showed, plus the
-    operator and the timestamp, in <core>/.consent.json. The plugin never imports it.
+    bootstrap.py relays an acceptance the operator actually gives: it prints the official text
+    first, then takes the answer either from a typed phrase at a terminal or, when no terminal
+    exists, from an authorisation recorded as --approved-by / --approval-ref. It records the
+    digest of the text shown, the channel used, the operator and the timestamp in
+    <core>/.consent.json. The plugin never imports it, and the prompt is never answered without
+    an instruction that can be pointed at.
 
     In summary — the terms permit commercial and non-commercial use and allow embedding
     the models in an application, provided that:

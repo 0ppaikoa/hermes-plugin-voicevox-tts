@@ -97,6 +97,62 @@ class TestAccept(Base):
         self.assertEqual(code, 3)
         self.assertEqual(seen, [], "nothing may be run without a TTY")
 
+    def test_refuses_with_only_half_the_authorisation(self):
+        seen: list[str] = []
+
+        def fake_runner(binary, core_dir, answer):
+            seen.append(answer)
+            return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
+
+        for kwargs in ({"approved_by": "yuki-js"}, {"approval_ref": "chat"}):
+            with mock.patch.object(bootstrap, "run_downloader", fake_runner), \
+                 mock.patch.object(sys.stdin, "isatty", lambda: False), \
+                 redirect_stdout(io.StringIO()):
+                self.assertEqual(bootstrap.accept("dl", self.core, **kwargs), 3, kwargs)
+        self.assertEqual(seen, [], "half an authorisation is no authorisation")
+
+    def test_agent_channel_works_with_a_recorded_authorisation(self):
+        """No terminal (an agent), but the operator said yes in the conversation."""
+        seen: list[str] = []
+
+        def fake_runner(binary, core_dir, answer):
+            seen.append(answer)
+            if answer == "n":
+                return subprocess.CompletedProcess(args=[], returncode=1,
+                                                   stdout=TERMS_SAMPLE, stderr="")
+            make_data(core_dir)
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
+
+        with mock.patch.object(bootstrap, "run_downloader", fake_runner), \
+             mock.patch.object(sys.stdin, "isatty", lambda: False), \
+             redirect_stdout(io.StringIO()):
+            code = bootstrap.accept("dl", self.core, approved_by="yuki-js",
+                                    approval_ref="chat 2026-11-06T07:55Z: 'go ahead'")
+
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, ["n", "y"], "terms still get shown before anything is fetched")
+        with open(os.path.join(self.core, ".consent.json"), encoding="utf-8") as fh:
+            record = json.load(fh)
+        self.assertEqual(record["accepted_by"], "yuki-js")
+        self.assertIn("delegated", record["consent_channel"])
+        self.assertIn("go ahead", record["approval_ref"])
+
+    def test_interactive_record_says_so(self):
+        def fake_runner(binary, core_dir, answer):
+            if answer == "n":
+                return subprocess.CompletedProcess(args=[], returncode=1,
+                                                   stdout=TERMS_SAMPLE, stderr="")
+            make_data(core_dir)
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
+
+        with mock.patch.object(bootstrap, "run_downloader", fake_runner), \
+             mock.patch.object(sys.stdin, "isatty", lambda: True), \
+             mock.patch("builtins.input", lambda *_: bootstrap.PHASE), \
+             redirect_stdout(io.StringIO()):
+            self.assertEqual(bootstrap.accept("dl", self.core), 0)
+        with open(os.path.join(self.core, ".consent.json"), encoding="utf-8") as fh:
+            self.assertIn("interactive", json.load(fh)["consent_channel"])
+
     def test_refuses_the_wrong_phrase(self):
         seen: list[str] = []
 

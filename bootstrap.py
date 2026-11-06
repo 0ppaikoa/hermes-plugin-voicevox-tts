@@ -6,13 +6,20 @@ prompt exists so a person reads it. This script keeps it that way:
 
     python bootstrap.py                 # verify what is installed; say what is missing
     python bootstrap.py --show-terms    # print the official terms text, download nothing
-    python bootstrap.py --accept        # show the terms, require a typed phrase, then fetch
+    python bootstrap.py --accept        # interactive: print the terms, require a typed phrase
 
-`--accept` is still not the plugin accepting anything: it runs the official downloader with the
-operator's own instruction relayed, and records what was accepted, when, and against which text.
-The plugin itself (`hermes_voicevox`) never imports this file and never downloads anything.
+An agent has no terminal, and its only consent channel is the conversation it is having with the
+operator. For that case the same acceptance can be relayed, but only with the authorisation
+recorded alongside it:
 
-Exit codes: 0 ok, 2 data missing, 3 refused (no TTY / wrong phrase / downloader failed).
+    python bootstrap.py --accept --approved-by "yuki-js" \
+        --approval-ref "chat 2026-11-06T07:55Z: 'go ahead'"
+
+Either way the downloader's prompt is answered *on the operator's instruction*, never on the
+plugin's own initiative, and the record says which of the two channels it came through. The
+plugin (`hermes_voicevox`) never imports this file and never downloads anything.
+
+Exit codes: 0 ok, 2 data missing, 3 refused (no authorisation / wrong phrase / download failed).
 """
 
 from __future__ import annotations
@@ -87,12 +94,17 @@ def _sha256(path: str) -> str:
     return digest.hexdigest()
 
 
-def consent_record(core_dir: str, terms_text: str) -> dict:
+def consent_record(core_dir: str, terms_text: str, *, approved_by: str = "",
+                   approval_ref: str = "") -> dict:
     """What was accepted, in a form that can be re-checked when the terms change."""
+    delegated = bool(approved_by and approval_ref)
     record = {
         "accepted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "accepted_by": os.environ.get("USER") or os.environ.get("LOGNAME") or "unknown",
-        "accepted_via": "bootstrap.py --accept (operator-typed phrase, official downloader prompt)",
+        "accepted_by": approved_by or os.environ.get("USER") or os.environ.get("LOGNAME") or "unknown",
+        "consent_channel": "delegated (agent relaying an instruction)" if delegated
+                           else "interactive (operator typed the phrase)",
+        "approval_ref": approval_ref,
+        "accepted_via": "bootstrap.py --accept, relaying the official downloader prompt",
         "phrase": PHASE,
         "terms_text_sha256": hashlib.sha256(terms_text.encode("utf-8")).hexdigest(),
         "assets": {},
@@ -109,27 +121,37 @@ def consent_record(core_dir: str, terms_text: str) -> dict:
     return record
 
 
-def accept(binary: str, core_dir: str) -> int:
-    if not sys.stdin.isatty():
-        print("拒否: --accept は対話端末でのみ実行できます。")
-        print("規約を読んで同意するのは人間の作業です。TTY から実行し直してください。",
-              file=sys.stderr)
+def accept(binary: str, core_dir: str, *, approved_by: str = "", approval_ref: str = "") -> int:
+    """Relay an acceptance that the operator actually gave, and record which channel it came by.
+
+    Interactive (a terminal): the operator types the phrase themselves.
+    Delegated (no terminal, e.g. an agent): requires ``approved_by`` and ``approval_ref``, so the
+    keystroke is traceable to a specific instruction rather than to the software's own judgement.
+    """
+    interactive = sys.stdin.isatty()
+    if not interactive and not (approved_by and approval_ref):
+        print("拒否: 端末がなく、承認の記録もありません（--approved-by と --approval-ref が必要）。")
+        print("規約を読んで同意するのは人間の作業です。会話で承認を得てから、その根拠とともに", file=sys.stderr)
+        print("実行し直してください。", file=sys.stderr)
         return 3
 
     print("以下は公式ダウンローダーが表示する利用規約の原文です（まだ何も取得していません）。\n")
     terms_text = show_terms(binary, core_dir)
 
-    print("\n" + "=" * 72)
-    print("内容を確認したうえで、続行するには次の語句をそのまま入力してください:")
-    print(f"    {PHASE}")
-    print("=" * 72)
-    try:
-        typed = input("> ").strip()
-    except EOFError:
-        typed = ""
-    if typed != PHASE:
-        print("拒否: 入力が一致しません。何も取得していません。", file=sys.stderr)
-        return 3
+    if interactive:
+        print("\n" + "=" * 72)
+        print("内容を確認したうえで、続行するには次の語句をそのまま入力してください:")
+        print(f"    {PHASE}")
+        print("=" * 72)
+        try:
+            typed = input("> ").strip()
+        except EOFError:
+            typed = ""
+        if typed != PHASE:
+            print("拒否: 入力が一致しません。何も取得していません。", file=sys.stderr)
+            return 3
+    else:
+        print(f"\n承認済みとして続行します（--approved-by {approved_by!r} / {approval_ref!r}）。")
 
     print("取得します（公式ダウンローダーに、いま入力された同意を渡します）…")
     result = run_downloader(binary, core_dir, "y")
@@ -139,7 +161,8 @@ def accept(binary: str, core_dir: str) -> int:
         print("失敗: 取得が完了しませんでした。", file=sys.stderr)
         return 3
 
-    record = consent_record(core_dir, terms_text)
+    record = consent_record(core_dir, terms_text, approved_by=approved_by,
+                            approval_ref=approval_ref)
     record_path = os.path.join(core_dir, ".consent.json")
     with open(record_path, "w", encoding="utf-8") as handle:
         json.dump(record, handle, ensure_ascii=False, indent=2)
@@ -176,6 +199,10 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"data directory (default: {DEFAULT_CORE})")
     parser.add_argument("--show-terms", action="store_true", help="print the terms, accept nothing")
     parser.add_argument("--accept", action="store_true", help="accept with a typed phrase, then fetch")
+    parser.add_argument("--approved-by", default="",
+                        help="delegated mode: who authorised this (agent use, no terminal)")
+    parser.add_argument("--approval-ref", default="",
+                        help="delegated mode: where/when the authorisation was given")
     args = parser.parse_args(argv)
 
     core_dir = os.path.abspath(os.path.expanduser(args.core))
@@ -185,7 +212,8 @@ def main(argv: list[str] | None = None) -> int:
         print("\n何も取得していません。")
         return 0
     if args.accept:
-        return accept(ensure_downloader(os.path.expanduser(CACHE)), core_dir)
+        return accept(ensure_downloader(os.path.expanduser(CACHE)), core_dir,
+                      approved_by=args.approved_by, approval_ref=args.approval_ref)
     return verify(core_dir)
 
 

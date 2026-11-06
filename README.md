@@ -123,11 +123,18 @@ over:
    command when the directory is empty.
 2. **Crediting generated audio**, e.g. `VOICEVOX:ずんだもん`, whenever you publish it.
 
-`bootstrap.py` keeps both of those yours. It is not imported by the plugin, it refuses to run
-`--accept` without a terminal, it shows the official terms text before anything is fetched, it
-requires the phrase `同意して取得する` typed by hand, and it writes `<core>/.consent.json` with
-the digest of the exact terms text it showed you. Re-run `python bootstrap.py` at any time to see
-what is installed and what was accepted.
+`bootstrap.py` keeps both of those yours. It is not imported by the plugin, it always shows the
+official terms text before anything is fetched, and it writes `<core>/.consent.json` with the
+digest of the exact text it showed you. Re-run `python bootstrap.py` at any time to see what is
+installed and what was accepted.
+
+It accepts on two channels, and records which one was used:
+
+- `--accept` in a terminal: you type `同意して取得する` yourself.
+- `--accept --approved-by <who> --approval-ref <where/when you said yes>` when there is no
+  terminal — an agent relaying an instruction you actually gave in conversation. Half an
+  authorisation (one flag without the other) is refused outright, and the record names the
+  channel, so every acceptance is traceable to a specific "yes".
 
 ## Design notes
 
