@@ -1,7 +1,8 @@
 # Implementation plan
 
-Status: **draft, nothing implemented.** Every "verified" statement below was read out of source
-code or release artifacts while writing this document; anything inferred is labelled as such.
+Status: **plan implemented** (P1–P3 on `feat/core-provider`). This document is kept as the
+record of *why* the code looks the way it does — every "verified" statement below was read out of
+source code, release artifacts or measurements; anything inferred is labelled as such.
 
 Goal: a Hermes Agent TTS provider that renders replies through **VOICEVOX CORE** — the synthesis
 library, loaded in-process — with no engine process, no HTTP, no IPC.
@@ -44,6 +45,10 @@ class TTSProvider(CatalogProviderBase):
     def release(self) -> None: ...
 ```
 
+Only `synthesize()` is abstract (`agent/tts_provider.py`); `list_voices`, `default_voice`,
+`stream`, `warm`, `release` all have defaults. `voice_compatible` is a read-only **property** the
+delivery code reads, so "ffmpeg present" has to be an override, not an attribute.
+
 Three constraints that shape the design:
 
 - **`is_available()` must not touch the network and must not raise** — the picker calls it on
@@ -59,10 +64,11 @@ Three constraints that shape the design:
   make `output_path` carry the right extension. CORE returns WAV, so the plugin writes `.wav`.
 
 **Delivery.** `tools/tts_tool.py::_finalize_voice_delivery` converts a plugin's output to
-Opus/OGG when the provider reports `voice_compatible` and the platform wants a voice bubble; a
-provider that already wrote `.ogg` skips the conversion. CORE gives WAV, so the plugin reports
-`voice_compatible = ffmpeg present` and lets Hermes do the single WAV→Opus step. Without ffmpeg
-the reply arrives as a plain audio attachment instead of a voice bubble — degraded, not broken.
+Opus/OGG whenever the provider reports `voice_compatible` — it does **not** consult `want_opus`
+for plugin providers, so this happens on CLI and desktop too, not only where a voice bubble is
+wanted. A provider that already wrote `.ogg` skips the conversion. CORE gives WAV, so the plugin
+reports `voice_compatible` = ffmpeg present and lets Hermes do the single WAV→Opus step; without
+ffmpeg the file is delivered as-is.
 
 **Text length.** Hermes splits long replies before calling the provider; the cap comes from
 `tts.<provider>.max_text_length`, else `FALLBACK_MAX_TEXT_LENGTH`. So `tts.voicevox.max_text_length`
@@ -157,6 +163,34 @@ The C API call order there (`make_default_load_onnxruntime_options` → `onnxrun
 `synthesizer_tts` → `wav_free`) is the same ceremony the Python binding performs internally.
 
 
+## 3b. What the experiments settled
+
+Full numbers in [experiments.md](experiments.md). The six that change the design:
+
+1. **`cpu_num_threads` must be explicit.** The documented default `0` behaved like a single
+   thread here (real-time factor 0.71–1.03); passing `4` gave 0.28–0.31. Never rely on the
+   default — `min(4, cpu_count)` and a config override.
+2. **Nothing costs anything until a model loads.** Import 16 ms, ONNX Runtime 12 ms, OpenJtalk and
+   `Synthesizer` instant. Model load is 0.66–0.88 s and ~145 MB. So `is_available()` can be a pure
+   filesystem check and `warm()` can be the only eager path.
+3. **Voice listing needs no ONNX Runtime.** Reading `.vvm` metas works with no runtime loaded:
+   11 styles over two files in 0.3 ms. `list_voices()` must never load a model.
+4. **`release()` really returns memory** — 354 MB → 150 MB in 95 ms. ONNX Runtime itself stays
+   (singleton, unloadable by design), so the honest idle figure is ~150 MB, not ~30 MB.
+5. **`unload_voice_model` invalidates the loaded styles.** The next `tts()` raises
+   `StyleNotFoundError`, so the provider reloads transparently (0.66 s) rather than trusting cache.
+6. **Concurrent `tts()` was byte-identical to serial** on four threads. A lock stays as insurance,
+   not because CORE is broken.
+
+Two traps that must be encoded:
+
+- `Onnxruntime.load_once(filename=…)` **ignores `filename` once the singleton exists**, so a bad
+  path is silently accepted after a successful first call.
+- The default filename (`libvoicevox_onnxruntime.so.1.23.2`) does **not** match what the official
+  downloader installs (`…so.1.17.3`). Resolve the real file; do not trust the default.
+
+
+
 ## 4. Module layout
 
 ```
@@ -179,40 +213,54 @@ is inside a function so that importing the plugin on a machine without CORE succ
 ## 5. Lifecycle and memory
 
 ```
-first synthesis  ──► load ONNX Runtime (once per process)
-                 ──► OpenJtalk(dict)
-                 ──► Synthesizer(…, cpu_num_threads=0)
+first synthesis  ──► load ONNX Runtime (once per process, 12 ms)
+                 ──► OpenJtalk(dict)                       (~0 ms)
+                 ──► Synthesizer(…, cpu_num_threads=min(4, cpu_count))
                  ──► VoiceModelFile.open(vvm) for the requested style only
-                 ──► load_voice_model  ──► tts() ──► write WAV
-release()        ──► unload_voice_model(...) ──► drop the Synthesizer reference
+                 ──► load_voice_model                      (0.66–0.88 s, ~+145 MB)
+                 ──► tts() ──► write WAV
+release()        ──► unload_voice_model(...)               (95 ms, −185 MB)
                      (keep ONNX Runtime: it is a singleton and re-loading it is not supported)
 ```
 
 Design rules:
 
-- **One model at a time by default.** CORE's `load_voice_model` is per-model; loading every `.vvm`
-  in the directory is what makes people give up on CORE as "heavy". The plugin loads the model
-  that owns the requested style, and unloads the previous one when the style changes
-  (`on_existing="ERROR"` is fine because we track what we loaded).
+- **One model at a time by default.** `load_voice_model` is per-model; loading every `.vvm`
+  in the directory is what makes people give up on CORE as "heavy". Load the model that owns the
+  requested style, unload the previous one when the style changes. Measured: a second model costs
+  +88 MB and 0.69 s, so keeping two characters resident is affordable but is not the default.
 - **`release()` unloads; `warm()` pre-loads** for the configured style. Hermes already holds a
-  lease while speech is on and releases it after `tts.keep_warm_seconds`, so "idle" is a state
-  the plugin can reach without inventing a timer.
-- **A lock around synthesis.** Hermes may resolve up to three consecutive sentences concurrently
-  on the streaming path; CORE's thread-safety is not documented. Serialise, do not hope.
+  lease while speech is on and releases it after `tts.keep_warm_seconds`, so "idle" is a state the
+  plugin can reach without inventing a timer. Measured: 354 MB → 150 MB.
+- **Reload after unload.** `unload_voice_model` makes later `tts()` raise `StyleNotFoundError`
+  even though the `.vvm` is still on disk; the provider must reconnect the model transparently
+  instead of caching "loaded once, forever".
+- **A lock around synthesis.** Four concurrent calls were byte-identical to serial here, so this
+  is insurance against the streaming path interleaving differently — not a bug fix.
 - **Never initialize at import.** A gateway that imports the plugin must not pay model load time
-  (or fail) at boot.
+  (or fail) at boot; measured import cost is 16 ms and must stay that way.
 
-Open question: whether one `Synthesizer` can hold two models at once cheaply enough to avoid a
-reload when a reply switches character. To be measured in P2, not guessed.
+Resolved by measurement: two models in one `Synthesizer` coexist fine (11 styles across `0.vvm`
+and `1.vvm`, +88 MB), so switching character within a reply is a policy choice about RAM, not a
+limitation.
+
 
 
 ## 6. Streaming (deferred)
 
-CORE exposes `SynthesisStream`, so `streams_pcm = True` with a real `stream()` is plausible:
-synthesize to a stream, drop the WAV header, yield int16 PCM at `FRAME_RATE * 100` Hz. That would
-let Hermes start speaking on the first chunk instead of the whole file. Not v1 — it doubles the
-surface and the failure modes, and `synthesize()` already produces speech. Keep the door open by
-never assuming the file path is the only output.
+Measured: `Synthesizer.streaming_synthesis(audio_query, style_id, segment_length=0.3)` returns a
+`SynthesisStream` iterator whose **first element is the 44-byte RIFF header** and whose remainder
+is raw PCM. For 4.28 s of audio: 16 chunks, 205 356 bytes total = 44 + 205 312, sizes
+`{44, 4608, 14336}`, all even.
+
+So `streams_pcm = True` is a known-shape job, not a research project: consume the query, skip the
+44-byte header, yield int16 LE mono at **24 000 Hz** (`FRAME_RATE 93.75 × 256`), and declare
+`stream_sample_rate = 24000`. That lets Hermes start speaking on the first segment instead of the
+whole file.
+
+Not v1: it doubles the surface and the failure modes, and `synthesize()` already produces speech.
+The door stays open by never assuming the file path is the only output.
+
 
 A cheaper intermediate: keep the WAV in `synthesize()`, and let Hermes' existing
 `min_len`-based sentence splitting be the granularity. Measure perceived latency first.
@@ -229,9 +277,18 @@ transitively. Options:
 | Extra index / vendored wheels in this repo | works, but ships ~2 MB per platform and needs CI per target |
 | Optional dependency: plugin works, `is_available()` False, error tells you what to install | **v1** |
 
-v1 ships **no hard dependency**: `hermes_voicevox` imports fine everywhere, and the first
-synthesis that finds no `voicevox_core` raises one message naming the wheel to install and the
-downloader command to run. That also keeps `is_available()` cheap and network-free.
+v1 ships **no hard dependency**, but the original version of this section was wrong about how
+that surfaces. `check_tts_requirements()` (`tools/tts_tool.py`) is the `text_to_speech` tool's
+`check_fn` and it delegates to `_plugin_provider_is_available()` → `provider.is_available()`;
+the registry **drops the tool entirely** when that returns False (`tools/registry.py`). So
+"is_available() False, but synthesis raises a nice error" is unreachable — there is no tool left
+to raise anything.
+
+Decision: `is_available()` returns **True whenever the plugin is loaded**, and every failure
+(no `voicevox_core`, no core dir, no `.vvm`, missing dict) is raised from `synthesize()` with the
+exact remedy. The tool therefore stays visible and a misconfiguration comes back as one readable
+error in the conversation instead of a silently missing capability. The verdict is TTL-cached by
+the registry, not recomputed per paint, so this stays cheap.
 
 Separate question for later: whether to publish wheels of *this* plugin for every platform, or
 only sdist + instructions.
@@ -257,13 +314,17 @@ unit-test scope above is not wishful.
 
 ## 9. Phases
 
-**P1 — skeleton.** `VoicevoxProvider` + `core.py` + config resolution + error messages; unit and
-fake-CORE tests green. *Done when:* `python -m unittest` passes with no CORE installed, and a
-machine without CORE gets one actionable message instead of a traceback.
+**P1 — skeleton.** ✅ `hermes_voicevox/__init__.py` + `core.py` + config resolution + error
+messages; 42 unit tests green against a fake CORE, with no CORE installed and no network.
 
-**P2 — real speech.** Live test in a throwaway venv: downloader → dict + `0.vvm` → synthesize →
-valid WAV. Measure cold start, steady-state RSS, and whether two styles fit in one process.
-*Done when:* the live test passes and the numbers are in the README.
+**P2 — real speech.** *Already answered by the experiments:* real CORE, real dict, real `0.vvm`,
+4.28 s of audio out of `tts()`, and the timings/RSS in [experiments.md](experiments.md). What
+remains for P2 is the part experiments did not prove — the provider inside Hermes: `register()`,
+dispatch through `tools.tts_tool`, `warm()`/`release()` against the lease, and a style switch
+without a leak. *Done when:* a live test synthesizes through the Hermes dispatcher, not through
+the binding directly. ✅ 5 live tests against real CORE 0.17.1: 1,000 chars → 166 s of audio with
+RSS +134 MB, and `release()` drops 207 → 146 MB.
+
 
 **P3 — voices and lifecycle.** `list_voices()` from `.vvm` metas, style-name resolution,
 `warm()`/`release()` wired to Hermes' lease, model switch without leak. *Done when:* toggling
@@ -284,8 +345,91 @@ no repo.
    env, or both (env wins)? The readthecard service uses `VOICEVOX_CORE_DIR`; matching that name
    costs nothing.
 3. **Multi-style replies.** Does Aok need to change voice mid-conversation (ずんだもん → めたん),
-   or is one style per config enough for v1?
+   or is one style per config enough for v1? Measured: a second resident model costs +88 MB and
+   0.69 s once — so "yes" is affordable; this is a product question, not a technical one.
+
 4. **Windows first-class?** Hermes runs there; CORE has a `win_amd64` wheel. Claiming support
    without testing on it would be dishonest, so either test it or say "Linux/macOS in v1".
 5. **Python floor.** The wheel is `cp310-abi3`; `manylinux_2_34` implies glibc ≥ 2.34. Hermes'
    own runtime is newer, so this is documentation, not a blocker.
+
+
+## 11. Independent review, and what it changed
+
+An independent reviewer checked every claim above against `/opt/hermes` and the real binding.
+What it broke, and what we now do instead:
+
+| finding | consequence |
+|---|---|
+| `is_available()` is the tool's `check_fn`; False **removes** `text_to_speech` | never gate on availability — report in `synthesize()` (§7) |
+| `warm()`/`release()` fire only from voice-mode leases (CLI `/voice`, desktop, TUI), **never** from the `text_to_speech` tool | an agent-initiated reply would pin ~150 MB forever. Add a plugin-owned idle unload timer |
+| `Synthesizer.tts()` has no `speed` parameter | use `create_audio_query` → set `speed_scale` → `synthesis()` |
+| only `tts.voice`/`model`/`speed` reach the provider; `tts.voicevox.*` does not | the plugin reads its own section per call, under the caller's profile scope |
+| `release()` can run inline under the global lease lock when `keep_warm_seconds: 0` | `release()` must be cheap, idempotent, must never raise and must never call back into TTS |
+| `plugins.isolation: host` runs the plugin in a host process reached over RPC | "no IPC" is only true for `in_process`; say so instead of over-claiming |
+| ONNX Runtime is a process-wide singleton and `load_once` ignores `filename` after the first success | the first profile/CORE dir wins for the process; a second profile's `core:` is ignored |
+| Hermes splits text on `[.!?;:,]` + whitespace only | Japanese `。、` never triggers a sentence split; a 4400-char reply is hard-cut at the cap. The plugin should split on Japanese punctuation itself and concatenate WAVs |
+| `min(4, os.cpu_count())` ignores cgroup quota | size the default from CPU affinity/`cpu.max`, then cap at 4 |
+| the previous "30/30 tests" line referred to a discarded HTTP prototype | removed; it proved nothing about this design |
+
+Reviewer's verdict was "not safe as written", with three pre-conditions: fix the availability/error
+contract, make unload independent of the lease, and pin the config/speed/isolation story. All three
+are now in §§5, 7 and above.
+
+Two of its criticisms were themselves imprecise and were checked rather than adopted: the Opus
+conversion happens regardless of `want_opus` (already corrected in §1), and `0.vvm`/`1.vvm` style
+ids are **disjoint** (0–8, 10 vs 14), which is what makes "the model that owns the style"
+well-defined rather than ambiguous.
+
+## 12. Memory ceilings, measured in an isolated Job
+
+Run in a throwaway `batch/v1 Job` in the `aok` namespace (`python:3.11-slim`, limit 7 Gi, 4 CPU) so
+an OOM could not touch the gateway. Same wheel, same dict, same `0.vvm`, `cpu_num_threads=4`.
+
+### One `tts()` call per reply — the shape that fails
+
+| text | audio | peak RSS | delta | outcome |
+|---|---|---|---|---|
+| 100 chars | 18.0 s | 618 MB | +412 MB | ok |
+| 200 chars | 36.0 s | 1,496 MB | +878 MB | ok |
+| 400 chars | 71.5 s | 3,908 MB | +2,412 MB | ok |
+| 800 chars | ~143 s | — | — | **OOMKilled (exit 137)** |
+
+Memory does not come back: `after == peak` in every row. The cost is roughly **23–34 MB per second
+of generated audio**, so a single call's footprint is a function of how long it speaks, not of the
+text's byte length. Hermes' own fallback cap is 4,000 chars, which sits well past the OOM point.
+
+### Sentence-at-a-time — the shape that holds
+
+Splitting on `。！？` and synthesizing each piece into the same WAV:
+
+| text | pieces | audio | rtf | peak RSS | delta |
+|---|---|---|---|---|---|
+| 200 chars | 12 | 34.0 s | 0.29 | 310 MB | +111 MB |
+| 400 chars | 23 | 67.6 s | 0.30 | 310 MB | 0 |
+| 800 chars | 46 | 134.8 s | 0.29 | 310 MB | 0 |
+| 1,600 chars | 92 | 269.5 s | 0.30 | 310 MB | 0 |
+| 2,400 chars | 137 | 403.9 s | 0.29 | 310 MB | 0 |
+| 4,000 chars | 229 | 673.2 s | 0.29 | 310 MB | 0 |
+
+**Flat at 310 MB from 200 to 4,000 characters**, with the same real-time factor. A 4,000-char reply
+that OOMs as one call costs 310 MB as 229 calls.
+
+Control run: after that loop, a *single* 200-char call still jumped 310 MB → 1,372 MB. So the
+per-call cost is inherent to CORE's long-utterance path, not an accumulated leak.
+
+### Decisions this forces
+
+1. **The plugin splits before it synthesizes.** `synthesize()` receives whatever Hermes hands it —
+   up to 4,000 chars — and must not pass that to `tts()` in one go. Split on `。！？`（plus `、`
+   for very long clauses), synthesize each piece, concatenate the WAV payloads, return one file.
+   This is not an optimisation; without it a normal long reply OOM-kills the gateway.
+2. **`max_text_length` is a plugin concern, not the tool's.** `tts.voicevox.max_text_length` should
+   stay modest so Hermes itself chunks earlier and each delivered file stays small.
+3. **Hermes' own splitter is useless for Japanese** (`(?<=[.!?])\s+`), so the split above is the
+   only one that will happen.
+4. **`unload_voice_model` takes the model's UUID** (`VoiceModelId`), not a style id — passing a
+   style id raises `TypeError: Expected a uuid.UUID instance`. Measured the hard way at the end of
+   the Job.
+5. Memory is never returned inside a process, so the *idle* figure is whatever the largest
+   single call reached. Sentence chunking keeps that at ~310 MB, which is the real argument for it.
