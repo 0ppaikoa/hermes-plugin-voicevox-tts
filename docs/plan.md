@@ -157,6 +157,34 @@ The C API call order there (`make_default_load_onnxruntime_options` → `onnxrun
 `synthesizer_tts` → `wav_free`) is the same ceremony the Python binding performs internally.
 
 
+## 3b. What the experiments settled
+
+Full numbers in [experiments.md](experiments.md). The six that change the design:
+
+1. **`cpu_num_threads` must be explicit.** The documented default `0` behaved like a single
+   thread here (real-time factor 0.71–1.03); passing `4` gave 0.28–0.31. Never rely on the
+   default — `min(4, cpu_count)` and a config override.
+2. **Nothing costs anything until a model loads.** Import 16 ms, ONNX Runtime 12 ms, OpenJtalk and
+   `Synthesizer` instant. Model load is 0.66–0.88 s and ~145 MB. So `is_available()` can be a pure
+   filesystem check and `warm()` can be the only eager path.
+3. **Voice listing needs no ONNX Runtime.** Reading `.vvm` metas works with no runtime loaded:
+   11 styles over two files in 0.3 ms. `list_voices()` must never load a model.
+4. **`release()` really returns memory** — 354 MB → 150 MB in 95 ms. ONNX Runtime itself stays
+   (singleton, unloadable by design), so the honest idle figure is ~150 MB, not ~30 MB.
+5. **`unload_voice_model` invalidates the loaded styles.** The next `tts()` raises
+   `StyleNotFoundError`, so the provider reloads transparently (0.66 s) rather than trusting cache.
+6. **Concurrent `tts()` was byte-identical to serial** on four threads. A lock stays as insurance,
+   not because CORE is broken.
+
+Two traps that must be encoded:
+
+- `Onnxruntime.load_once(filename=…)` **ignores `filename` once the singleton exists**, so a bad
+  path is silently accepted after a successful first call.
+- The default filename (`libvoicevox_onnxruntime.so.1.23.2`) does **not** match what the official
+  downloader installs (`…so.1.17.3`). Resolve the real file; do not trust the default.
+
+
+
 ## 4. Module layout
 
 ```
@@ -179,40 +207,54 @@ is inside a function so that importing the plugin on a machine without CORE succ
 ## 5. Lifecycle and memory
 
 ```
-first synthesis  ──► load ONNX Runtime (once per process)
-                 ──► OpenJtalk(dict)
-                 ──► Synthesizer(…, cpu_num_threads=0)
+first synthesis  ──► load ONNX Runtime (once per process, 12 ms)
+                 ──► OpenJtalk(dict)                       (~0 ms)
+                 ──► Synthesizer(…, cpu_num_threads=min(4, cpu_count))
                  ──► VoiceModelFile.open(vvm) for the requested style only
-                 ──► load_voice_model  ──► tts() ──► write WAV
-release()        ──► unload_voice_model(...) ──► drop the Synthesizer reference
+                 ──► load_voice_model                      (0.66–0.88 s, ~+145 MB)
+                 ──► tts() ──► write WAV
+release()        ──► unload_voice_model(...)               (95 ms, −185 MB)
                      (keep ONNX Runtime: it is a singleton and re-loading it is not supported)
 ```
 
 Design rules:
 
-- **One model at a time by default.** CORE's `load_voice_model` is per-model; loading every `.vvm`
-  in the directory is what makes people give up on CORE as "heavy". The plugin loads the model
-  that owns the requested style, and unloads the previous one when the style changes
-  (`on_existing="ERROR"` is fine because we track what we loaded).
+- **One model at a time by default.** `load_voice_model` is per-model; loading every `.vvm`
+  in the directory is what makes people give up on CORE as "heavy". Load the model that owns the
+  requested style, unload the previous one when the style changes. Measured: a second model costs
+  +88 MB and 0.69 s, so keeping two characters resident is affordable but is not the default.
 - **`release()` unloads; `warm()` pre-loads** for the configured style. Hermes already holds a
-  lease while speech is on and releases it after `tts.keep_warm_seconds`, so "idle" is a state
-  the plugin can reach without inventing a timer.
-- **A lock around synthesis.** Hermes may resolve up to three consecutive sentences concurrently
-  on the streaming path; CORE's thread-safety is not documented. Serialise, do not hope.
+  lease while speech is on and releases it after `tts.keep_warm_seconds`, so "idle" is a state the
+  plugin can reach without inventing a timer. Measured: 354 MB → 150 MB.
+- **Reload after unload.** `unload_voice_model` makes later `tts()` raise `StyleNotFoundError`
+  even though the `.vvm` is still on disk; the provider must reconnect the model transparently
+  instead of caching "loaded once, forever".
+- **A lock around synthesis.** Four concurrent calls were byte-identical to serial here, so this
+  is insurance against the streaming path interleaving differently — not a bug fix.
 - **Never initialize at import.** A gateway that imports the plugin must not pay model load time
-  (or fail) at boot.
+  (or fail) at boot; measured import cost is 16 ms and must stay that way.
 
-Open question: whether one `Synthesizer` can hold two models at once cheaply enough to avoid a
-reload when a reply switches character. To be measured in P2, not guessed.
+Resolved by measurement: two models in one `Synthesizer` coexist fine (11 styles across `0.vvm`
+and `1.vvm`, +88 MB), so switching character within a reply is a policy choice about RAM, not a
+limitation.
+
 
 
 ## 6. Streaming (deferred)
 
-CORE exposes `SynthesisStream`, so `streams_pcm = True` with a real `stream()` is plausible:
-synthesize to a stream, drop the WAV header, yield int16 PCM at `FRAME_RATE * 100` Hz. That would
-let Hermes start speaking on the first chunk instead of the whole file. Not v1 — it doubles the
-surface and the failure modes, and `synthesize()` already produces speech. Keep the door open by
-never assuming the file path is the only output.
+Measured: `Synthesizer.streaming_synthesis(audio_query, style_id, segment_length=0.3)` returns a
+`SynthesisStream` iterator whose **first element is the 44-byte RIFF header** and whose remainder
+is raw PCM. For 4.28 s of audio: 16 chunks, 205 356 bytes total = 44 + 205 312, sizes
+`{44, 4608, 14336}`, all even.
+
+So `streams_pcm = True` is a known-shape job, not a research project: consume the query, skip the
+44-byte header, yield int16 LE mono at **24 000 Hz** (`FRAME_RATE 93.75 × 256`), and declare
+`stream_sample_rate = 24000`. That lets Hermes start speaking on the first segment instead of the
+whole file.
+
+Not v1: it doubles the surface and the failure modes, and `synthesize()` already produces speech.
+The door stays open by never assuming the file path is the only output.
+
 
 A cheaper intermediate: keep the WAV in `synthesize()`, and let Hermes' existing
 `min_len`-based sentence splitting be the granularity. Measure perceived latency first.
@@ -261,9 +303,13 @@ unit-test scope above is not wishful.
 fake-CORE tests green. *Done when:* `python -m unittest` passes with no CORE installed, and a
 machine without CORE gets one actionable message instead of a traceback.
 
-**P2 — real speech.** Live test in a throwaway venv: downloader → dict + `0.vvm` → synthesize →
-valid WAV. Measure cold start, steady-state RSS, and whether two styles fit in one process.
-*Done when:* the live test passes and the numbers are in the README.
+**P2 — real speech.** *Already answered by the experiments:* real CORE, real dict, real `0.vvm`,
+4.28 s of audio out of `tts()`, and the timings/RSS in [experiments.md](experiments.md). What
+remains for P2 is the part experiments did not prove — the provider inside Hermes: `register()`,
+dispatch through `tools.tts_tool`, `warm()`/`release()` against the lease, and a style switch
+without a leak. *Done when:* a live test synthesizes through the Hermes dispatcher, not through
+the binding directly.
+
 
 **P3 — voices and lifecycle.** `list_voices()` from `.vvm` metas, style-name resolution,
 `warm()`/`release()` wired to Hermes' lease, model switch without leak. *Done when:* toggling
@@ -284,7 +330,9 @@ no repo.
    env, or both (env wins)? The readthecard service uses `VOICEVOX_CORE_DIR`; matching that name
    costs nothing.
 3. **Multi-style replies.** Does Aok need to change voice mid-conversation (ずんだもん → めたん),
-   or is one style per config enough for v1?
+   or is one style per config enough for v1? Measured: a second resident model costs +88 MB and
+   0.69 s once — so "yes" is affordable; this is a product question, not a technical one.
+
 4. **Windows first-class?** Hermes runs there; CORE has a `win_amd64` wheel. Claiming support
    without testing on it would be dishonest, so either test it or say "Linux/macOS in v1".
 5. **Python floor.** The wheel is `cp310-abi3`; `manylinux_2_34` implies glibc ≥ 2.34. Hermes'
