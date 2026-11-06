@@ -265,7 +265,11 @@ class TestFailures(Base):
         os.environ[core.ENV_CORE_DIR] = empty
         with self.assertRaises(vv.VoicevoxError) as caught:
             vv.VoicevoxProvider().synthesize("テスト。", self.out())
-        self.assertIn("models/vvms", str(caught.exception))
+        message = str(caught.exception)
+        self.assertIn("models/vvms", message)
+        # the consent obligation belongs to the operator; the plugin must say so, not do it
+        self.assertIn("accept the model terms", message)
+        self.assertIn("will not answer that prompt", message)
 
     def test_warm_never_raises(self):
         os.environ[core.ENV_CORE_DIR] = "/nonexistent/core"

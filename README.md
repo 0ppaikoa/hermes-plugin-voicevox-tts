@@ -104,12 +104,23 @@ Verified live: a 1,000-character reply (166 s of audio) moved RSS by **+134 MB**
 - No custom user dictionary, no singing synthesis, no GPU tuning.
 - One model resident at a time; switching character reloads (~0.7 s).
 
-## Credit
+## Licence, and what you owe
 
-Generated audio must credit VOICEVOX — e.g. `VOICEVOX:ずんだもん` — under the voice models'
-terms. That is your obligation when you publish the audio; the plugin only synthesises it.
+The plugin is **MIT** ([LICENSE](LICENSE)). It contains no VOICEVOX code, no voice models, no
+dictionary and no ONNX Runtime — it only calls the CORE installation you provide.
 
-The plugin is MIT. VOICEVOX CORE itself is MIT from 0.16 onward.
+[NOTICE](NOTICE) lists every third-party component with its licence or terms: VOICEVOX CORE
+(MIT), the voice models and the VOICEVOX ONNX Runtime (their own 利用規約), the Open JTalk
+dictionary (NAIST BSD), and ffmpeg (optional, LGPL/GPL depending on build).
+
+Two obligations land on **you**, the operator, and the plugin deliberately does not take them
+over:
+
+1. **Accepting the model terms.** The official downloader asks you to accept
+   「VOICEVOX 音声モデル 利用規約」 interactively, on purpose. This plugin never answers that
+   prompt, never pipes a `y` into it, and never downloads the models — it only tells you the
+   command when the directory is empty.
+2. **Crediting generated audio**, e.g. `VOICEVOX:ずんだもん`, whenever you publish it.
 
 ## Design notes
 

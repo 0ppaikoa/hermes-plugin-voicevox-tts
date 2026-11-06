@@ -206,8 +206,10 @@ class CoreEngine:
         vvms = _find_vvms(core_dir)
         if not vvms:
             raise VoicevoxError(
-                f"no voice models found under {core_dir}/models/vvms. Run the VOICEVOX CORE "
-                "downloader (--only models) or point tts.voicevox.core at the right directory."
+                f"no voice models found under {core_dir}/models/vvms. Run the official VOICEVOX "
+                "CORE downloader yourself (--only models) — it asks you to accept the model terms, "
+                "and this plugin will not answer that prompt for you. Or point tts.voicevox.core at "
+                "a directory that already has models (for example an existing readthecard install)."
             )
 
         index: dict[int, dict[str, Any]] = {}

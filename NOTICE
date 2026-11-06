@@ -1,0 +1,83 @@
+hermes-plugin-voicevox-tts
+Copyright (c) 2026 AokiApp Inc.
+
+This product includes and depends on software and data that are NOT covered by this
+project's MIT licence. Nothing below is redistributed by this repository; it is listed so
+that whoever deploys the plugin knows what they are agreeing to and to whom.
+
+--------------------------------------------------------------------------------
+1. This plugin itself
+--------------------------------------------------------------------------------
+
+    hermes_voicevox/  (all files in this repository)
+    Licence: MIT — see LICENSE
+
+    It contains no VOICEVOX code, no voice models, no dictionaries and no ONNX Runtime.
+    It is a client: it calls whatever VOICEVOX CORE installation the operator provides.
+
+--------------------------------------------------------------------------------
+2. VOICEVOX CORE  (installed separately by the operator)
+--------------------------------------------------------------------------------
+
+    https://github.com/VOICEVOX/voicevox_core
+    Licence: MIT (versions 0.16.0 and later)
+
+    Loaded in-process as the official Python wheel. Earlier releases carried a different
+    licence; this project targets 0.17.x.
+
+--------------------------------------------------------------------------------
+3. VOICEVOX voice models  (.vvm files — the voices themselves)
+--------------------------------------------------------------------------------
+
+    https://github.com/VOICEVOX/voicevox_vvm
+    Terms: 「VOICEVOX 音声モデル 利用規約」
+
+    Not redistributed here. Obtaining them means accepting those terms, and the official
+    downloader asks for that acceptance interactively on purpose. This project therefore
+    does not download them and does not answer that prompt: the operator runs the
+    downloader and accepts in person.
+
+    In summary — the terms permit commercial and non-commercial use and allow embedding
+    the models in an application, provided that:
+
+      - audio you publish is credited (for example "VOICEVOX:ずんだもん"), and
+      - anyone you pass the models on to is bound by the same conditions.
+
+    They prohibit reverse engineering and publication of the models' internals.
+
+    Read the actual text (models/TERMS.txt in your download) before you rely on any
+    summary, including this one.
+
+--------------------------------------------------------------------------------
+4. Open JTalk dictionary  (open_jtalk_dic_utf_8-1.11)
+--------------------------------------------------------------------------------
+
+    Copyright (c) 2009, Nara Institute of Science and Technology, Japan.
+    Licence: BSD-style (3-clause) — see the COPYING file inside the dictionary directory.
+
+    Also not redistributed here; the VOICEVOX downloader fetches it.
+
+--------------------------------------------------------------------------------
+5. VOICEVOX ONNX Runtime
+--------------------------------------------------------------------------------
+
+    https://github.com/VOICEVOX/onnxruntime-builder
+    Terms: 「VOICEVOX ONNX Runtime 利用規約」 (accepted at download time, like the models)
+
+    Also not redistributed here.
+
+--------------------------------------------------------------------------------
+6. ffmpeg  (optional, not required by this plugin)
+--------------------------------------------------------------------------------
+
+    Hermes uses ffmpeg to convert WAV to Opus/OGG for voice-bubble delivery. Builds vary
+    between LGPL and GPL depending on their configuration. This plugin neither bundles nor
+    invokes it directly.
+
+--------------------------------------------------------------------------------
+Note
+--------------------------------------------------------------------------------
+
+This file states facts. It adds no conditions to the MIT licence in LICENSE, and it grants
+no rights to any third-party component. Where a summary above disagrees with the actual
+licence text or terms of use of a component, the actual text governs.
