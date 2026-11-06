@@ -11,8 +11,11 @@ description: >
   into sentence-sized pieces before synthesis because one long call costs
   ~30 MB of resident memory per second of audio and can OOM the host, while
   sentence-at-a-time stays flat (~310 MB for a 4,000-character reply).
+  First run: the voicevox_setup tool reports what is missing, prints the official
+  licence text, and downloads only on an authorisation quoted from the conversation.
 requires_hermes: ">=0.21.0"
-provides_tools: []
+provides_tools:
+  - voicevox_setup
 provides_hooks: []
 optional_env:
   - name: HERMES_VOICEVOX_CORE_DIR

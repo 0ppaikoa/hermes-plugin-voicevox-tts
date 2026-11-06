@@ -209,7 +209,9 @@ class CoreEngine:
                 f"no voice models found under {core_dir}/models/vvms. Run the official VOICEVOX "
                 "CORE downloader yourself (--only models) — it asks you to accept the model terms, "
                 "and this plugin will not answer that prompt for you. Or point tts.voicevox.core at "
-                "a directory that already has models (for example an existing readthecard install)."
+                "a directory that already has models (for example an existing readthecard install). "
+                "In Hermes, call the voicevox_setup tool (action=status, then show_terms) to see what "
+                "is missing and to prepare it with the operator's agreement."
             )
 
         index: dict[int, dict[str, Any]] = {}

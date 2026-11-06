@@ -63,6 +63,20 @@ hermes plugins enable voicevox        # plugins are opt-in
 Then set `tts.provider: voicevox` and `tts.voicevox.core` in `config.yaml`, and restart the
 gateway. `hermes plugins enable` alone does nothing until the provider is selected.
 
+## First run, in a conversation
+
+If the data is missing, speaking fails with an error that names the `voicevox_setup` tool. The
+agent drives it from there, because the human's only channel may be the chat window:
+
+| action | what happens |
+|---|---|
+| `status` | what is installed, what licence text was accepted |
+| `show_terms` | prints the official terms text; downloads nothing |
+| `download` | fetches the data — **only** with `approved_by` and `approval_ref` quoting the operator |
+
+`download` without both fields is refused, and the refusal says what to ask for. With them,
+`<core>/.consent.json` records who agreed, their exact words, the terms digest, and the channel.
+
 ## Voices
 
 `speaker` takes an id or a name; `tts.voice` (or a per-call `voice`) overrides it:

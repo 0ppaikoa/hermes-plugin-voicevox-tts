@@ -25,6 +25,7 @@ licence, not this plugin's.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -48,6 +49,7 @@ except Exception:  # pragma: no cover - lets the test suite import without Herme
             raise NotImplementedError
 
 
+from . import setup as _setup  # noqa: E402
 from .core import (  # noqa: E402
     ENV_CORE_DIR,
     ConfigSource,
@@ -208,6 +210,82 @@ class VoicevoxProvider(TTSProvider):
         return target
 
 
+_SETUP_SCHEMA: dict[str, Any] = {
+    "name": "voicevox_setup",
+    "description": (
+        "Prepare the data VOICEVOX CORE needs (ONNX Runtime, dictionary, voice models) for the "
+        "`voicevox` TTS provider. Actions: `status` reports what is installed and what licence "
+        "text was accepted; `show_terms` prints the official terms and downloads nothing; "
+        "`download` fetches the data. Call `download` ONLY after the operator has explicitly "
+        "agreed in the conversation, and pass their exact words as approval_ref — never invent "
+        "one. This tool exists because the official downloader's prompt asks a human, and the "
+        "human's answer arrives in chat."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["status", "show_terms", "download"]},
+            "approved_by": {"type": "string",
+                            "description": "who agreed (required for action=download)"},
+            "approval_ref": {"type": "string",
+                             "description": "where and when they agreed, quoting them "
+                                            "(required for action=download)"},
+            "core": {"type": "string",
+                     "description": "optional CORE directory override (default: tts.voicevox.core)"},
+        },
+        "required": ["action"],
+    },
+}
+
+
+def _core_dir(override: Any = None) -> str:
+    if isinstance(override, str) and override.strip():
+        return os.path.abspath(os.path.expanduser(override.strip()))
+    configured = ConfigSource().core_dir()
+    return configured or os.path.abspath(os.path.expanduser(_setup.DEFAULT_CORE))
+
+
+def _handle_setup(args: dict[str, Any], **_kw: Any) -> str:
+    action = str(args.get("action") or "status").strip().lower()
+    core_dir = _core_dir(args.get("core"))
+
+    def envelope(ok: bool, **payload: Any) -> str:
+        return json.dumps({"success": ok, **payload}, ensure_ascii=False)
+
+    try:
+        if action == "status":
+            return envelope(True, **_setup.status(core_dir))
+        if action == "show_terms":
+            text = _setup.show_terms(_setup.ensure_downloader(), core_dir)
+            return envelope(True, core=core_dir, terms=text, downloaded=False)
+        if action == "download":
+            result = _setup.download(
+                core_dir,
+                approved_by=str(args.get("approved_by") or ""),
+                approval_ref=str(args.get("approval_ref") or ""),
+            )
+            return envelope(True, **result)
+        return envelope(False, error=f"unknown action {action!r}; expected status|show_terms|download")
+    except _setup.SetupRefused as exc:
+        return envelope(False, error=str(exc),
+                        needs=["approved_by", "approval_ref"],
+                        hint="Ask the operator in the conversation first, then pass their words.")
+    except Exception as exc:
+        return envelope(False, error=f"{type(exc).__name__}: {exc}")
+
+
 def register(ctx) -> None:
     """Plugin entry point."""
     ctx.register_tts_provider(VoicevoxProvider())
+    try:
+        ctx.register_tool(
+            name="voicevox_setup",
+            toolset="tts",
+            schema=_SETUP_SCHEMA,
+            handler=_handle_setup,
+            emoji="🗣",
+        )
+    except Exception as exc:
+        # The provider is the point; the setup tool is a convenience. A host that refuses the
+        # tool must still get speech, so this never propagates.
+        logger.warning("voicevox_setup tool was not registered: %s", exc)
