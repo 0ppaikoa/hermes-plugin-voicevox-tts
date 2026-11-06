@@ -379,3 +379,56 @@ Two of its criticisms were themselves imprecise and were checked rather than ado
 conversion happens regardless of `want_opus` (already corrected in §1), and `0.vvm`/`1.vvm` style
 ids are **disjoint** (0–8, 10 vs 14), which is what makes "the model that owns the style"
 well-defined rather than ambiguous.
+
+## 12. Memory ceilings, measured in an isolated Job
+
+Run in a throwaway `batch/v1 Job` in the `aok` namespace (`python:3.11-slim`, limit 7 Gi, 4 CPU) so
+an OOM could not touch the gateway. Same wheel, same dict, same `0.vvm`, `cpu_num_threads=4`.
+
+### One `tts()` call per reply — the shape that fails
+
+| text | audio | peak RSS | delta | outcome |
+|---|---|---|---|---|
+| 100 chars | 18.0 s | 618 MB | +412 MB | ok |
+| 200 chars | 36.0 s | 1,496 MB | +878 MB | ok |
+| 400 chars | 71.5 s | 3,908 MB | +2,412 MB | ok |
+| 800 chars | ~143 s | — | — | **OOMKilled (exit 137)** |
+
+Memory does not come back: `after == peak` in every row. The cost is roughly **23–34 MB per second
+of generated audio**, so a single call's footprint is a function of how long it speaks, not of the
+text's byte length. Hermes' own fallback cap is 4,000 chars, which sits well past the OOM point.
+
+### Sentence-at-a-time — the shape that holds
+
+Splitting on `。！？` and synthesizing each piece into the same WAV:
+
+| text | pieces | audio | rtf | peak RSS | delta |
+|---|---|---|---|---|---|
+| 200 chars | 12 | 34.0 s | 0.29 | 310 MB | +111 MB |
+| 400 chars | 23 | 67.6 s | 0.30 | 310 MB | 0 |
+| 800 chars | 46 | 134.8 s | 0.29 | 310 MB | 0 |
+| 1,600 chars | 92 | 269.5 s | 0.30 | 310 MB | 0 |
+| 2,400 chars | 137 | 403.9 s | 0.29 | 310 MB | 0 |
+| 4,000 chars | 229 | 673.2 s | 0.29 | 310 MB | 0 |
+
+**Flat at 310 MB from 200 to 4,000 characters**, with the same real-time factor. A 4,000-char reply
+that OOMs as one call costs 310 MB as 229 calls.
+
+Control run: after that loop, a *single* 200-char call still jumped 310 MB → 1,372 MB. So the
+per-call cost is inherent to CORE's long-utterance path, not an accumulated leak.
+
+### Decisions this forces
+
+1. **The plugin splits before it synthesizes.** `synthesize()` receives whatever Hermes hands it —
+   up to 4,000 chars — and must not pass that to `tts()` in one go. Split on `。！？`（plus `、`
+   for very long clauses), synthesize each piece, concatenate the WAV payloads, return one file.
+   This is not an optimisation; without it a normal long reply OOM-kills the gateway.
+2. **`max_text_length` is a plugin concern, not the tool's.** `tts.voicevox.max_text_length` should
+   stay modest so Hermes itself chunks earlier and each delivered file stays small.
+3. **Hermes' own splitter is useless for Japanese** (`(?<=[.!?])\s+`), so the split above is the
+   only one that will happen.
+4. **`unload_voice_model` takes the model's UUID** (`VoiceModelId`), not a style id — passing a
+   style id raises `TypeError: Expected a uuid.UUID instance`. Measured the hard way at the end of
+   the Job.
+5. Memory is never returned inside a process, so the *idle* figure is whatever the largest
+   single call reached. Sentence chunking keeps that at ~310 MB, which is the real argument for it.
