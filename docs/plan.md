@@ -44,6 +44,10 @@ class TTSProvider(CatalogProviderBase):
     def release(self) -> None: ...
 ```
 
+Only `synthesize()` is abstract (`agent/tts_provider.py`); `list_voices`, `default_voice`,
+`stream`, `warm`, `release` all have defaults. `voice_compatible` is a read-only **property** the
+delivery code reads, so "ffmpeg present" has to be an override, not an attribute.
+
 Three constraints that shape the design:
 
 - **`is_available()` must not touch the network and must not raise** — the picker calls it on
@@ -59,10 +63,11 @@ Three constraints that shape the design:
   make `output_path` carry the right extension. CORE returns WAV, so the plugin writes `.wav`.
 
 **Delivery.** `tools/tts_tool.py::_finalize_voice_delivery` converts a plugin's output to
-Opus/OGG when the provider reports `voice_compatible` and the platform wants a voice bubble; a
-provider that already wrote `.ogg` skips the conversion. CORE gives WAV, so the plugin reports
-`voice_compatible = ffmpeg present` and lets Hermes do the single WAV→Opus step. Without ffmpeg
-the reply arrives as a plain audio attachment instead of a voice bubble — degraded, not broken.
+Opus/OGG whenever the provider reports `voice_compatible` — it does **not** consult `want_opus`
+for plugin providers, so this happens on CLI and desktop too, not only where a voice bubble is
+wanted. A provider that already wrote `.ogg` skips the conversion. CORE gives WAV, so the plugin
+reports `voice_compatible` = ffmpeg present and lets Hermes do the single WAV→Opus step; without
+ffmpeg the file is delivered as-is.
 
 **Text length.** Hermes splits long replies before calling the provider; the cap comes from
 `tts.<provider>.max_text_length`, else `FALLBACK_MAX_TEXT_LENGTH`. So `tts.voicevox.max_text_length`
@@ -271,9 +276,18 @@ transitively. Options:
 | Extra index / vendored wheels in this repo | works, but ships ~2 MB per platform and needs CI per target |
 | Optional dependency: plugin works, `is_available()` False, error tells you what to install | **v1** |
 
-v1 ships **no hard dependency**: `hermes_voicevox` imports fine everywhere, and the first
-synthesis that finds no `voicevox_core` raises one message naming the wheel to install and the
-downloader command to run. That also keeps `is_available()` cheap and network-free.
+v1 ships **no hard dependency**, but the original version of this section was wrong about how
+that surfaces. `check_tts_requirements()` (`tools/tts_tool.py`) is the `text_to_speech` tool's
+`check_fn` and it delegates to `_plugin_provider_is_available()` → `provider.is_available()`;
+the registry **drops the tool entirely** when that returns False (`tools/registry.py`). So
+"is_available() False, but synthesis raises a nice error" is unreachable — there is no tool left
+to raise anything.
+
+Decision: `is_available()` returns **True whenever the plugin is loaded**, and every failure
+(no `voicevox_core`, no core dir, no `.vvm`, missing dict) is raised from `synthesize()` with the
+exact remedy. The tool therefore stays visible and a misconfiguration comes back as one readable
+error in the conversation instead of a silently missing capability. The verdict is TTL-cached by
+the registry, not recomputed per paint, so this stays cheap.
 
 Separate question for later: whether to publish wheels of *this* plugin for every platform, or
 only sdist + instructions.
@@ -337,3 +351,31 @@ no repo.
    without testing on it would be dishonest, so either test it or say "Linux/macOS in v1".
 5. **Python floor.** The wheel is `cp310-abi3`; `manylinux_2_34` implies glibc ≥ 2.34. Hermes'
    own runtime is newer, so this is documentation, not a blocker.
+
+
+## 11. Independent review, and what it changed
+
+An independent reviewer checked every claim above against `/opt/hermes` and the real binding.
+What it broke, and what we now do instead:
+
+| finding | consequence |
+|---|---|
+| `is_available()` is the tool's `check_fn`; False **removes** `text_to_speech` | never gate on availability — report in `synthesize()` (§7) |
+| `warm()`/`release()` fire only from voice-mode leases (CLI `/voice`, desktop, TUI), **never** from the `text_to_speech` tool | an agent-initiated reply would pin ~150 MB forever. Add a plugin-owned idle unload timer |
+| `Synthesizer.tts()` has no `speed` parameter | use `create_audio_query` → set `speed_scale` → `synthesis()` |
+| only `tts.voice`/`model`/`speed` reach the provider; `tts.voicevox.*` does not | the plugin reads its own section per call, under the caller's profile scope |
+| `release()` can run inline under the global lease lock when `keep_warm_seconds: 0` | `release()` must be cheap, idempotent, must never raise and must never call back into TTS |
+| `plugins.isolation: host` runs the plugin in a host process reached over RPC | "no IPC" is only true for `in_process`; say so instead of over-claiming |
+| ONNX Runtime is a process-wide singleton and `load_once` ignores `filename` after the first success | the first profile/CORE dir wins for the process; a second profile's `core:` is ignored |
+| Hermes splits text on `[.!?;:,]` + whitespace only | Japanese `。、` never triggers a sentence split; a 4400-char reply is hard-cut at the cap. The plugin should split on Japanese punctuation itself and concatenate WAVs |
+| `min(4, os.cpu_count())` ignores cgroup quota | size the default from CPU affinity/`cpu.max`, then cap at 4 |
+| the previous "30/30 tests" line referred to a discarded HTTP prototype | removed; it proved nothing about this design |
+
+Reviewer's verdict was "not safe as written", with three pre-conditions: fix the availability/error
+contract, make unload independent of the lease, and pin the config/speed/isolation story. All three
+are now in §§5, 7 and above.
+
+Two of its criticisms were themselves imprecise and were checked rather than adopted: the Opus
+conversion happens regardless of `want_opus` (already corrected in §1), and `0.vvm`/`1.vvm` style
+ids are **disjoint** (0–8, 10 vs 14), which is what makes "the model that owns the style"
+well-defined rather than ambiguous.

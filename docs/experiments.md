@@ -40,9 +40,9 @@ Consequence: `list_voices()` and any style→model resolution can run on a cold 
 engine cost. Voice discovery must not touch ONNX.
 
 `0.vvm` alone gave 10 styles — 四国めたん ×4, ずんだもん ×4, 春日部つむぎ, 雨晴はう — so
-**`0.vvm` is not "ずんだもん only"**; several characters share a file and a style id is not
-unique across files by convention, only within the loader. `1.vvm` added 冥鳴ひまり (id 14), total
-11 styles and +88 MB with both loaded.
+**`0.vvm` is not "ずんだもん only"**: several characters share one file. `1.vvm` added 冥鳴ひまり
+(id 14), total 11 styles and +88 MB with both loaded. The ids are **disjoint** between the two
+files (0–8 and 10 vs 14), which is what makes "the model that owns this style" unambiguous.
 
 ## 3. `cpu_num_threads` is the whole performance story
 
@@ -74,6 +74,11 @@ Consequence: the provider must never rely on the default. Default to `min(4, os.
 `unload_voice_model` released ~185 MB in 0.095 s. After unloading, `tts()` raises
 `StyleNotFoundError` — so the provider must reload transparently, which costs another 0.66 s.
 
+Attribution, checked afterwards in a fresh process: dropping the `Synthesizer` and `OpenJtalk`
+objects as well landed at ~142 MB, i.e. ONNX Runtime's own footprint is only ~10 MB. What stays
+resident is ORT's allocator arenas, not the runtime — the conclusion ("~150 MB floor") holds, the
+reasoning does not.
+
 40 sequential calls showed no growth after warm-up (354 MB constant), so the per-call path does
 not leak. The graph/allocator caches are what push 263 MB → 354 MB once; they do not come back
 down, so the honest idle number after `release()` is ~150 MB, not 30 MB.
@@ -93,7 +98,8 @@ Consequence: a lock is defence in depth, not a correctness requirement. Keep one
 
 - 16 chunks, **205 356 bytes total = 44-byte RIFF header + 205 312 bytes of PCM**
 - chunk sizes `{44, 4608, 14336}` — the first chunk is the WAV header, not audio
-- the iterator's first element arrives immediately (the method returns at once)
+- the *method* returns at once; elements are produced lazily as the stream is consumed, so the
+  0 ms figure is time-to-first-element, not time-to-first-audio
 - concatenated payload equals the PCM of the non-streaming `synthesis()` output
 
 Consequence: `streams_pcm = True` is feasible — strip the 44-byte header, yield the rest as
@@ -129,7 +135,7 @@ Two traps worth encoding in code:
 - `cpu_num_threads` is explicit, defaulting to ≤4; the documented default is a performance trap.
 - Model policy: load the model for the requested style, unload it on `release()`; ~0.7 s and
   ~145 MB per model, so two characters resident costs ~88 MB more but does buy instant switching.
-- `release()` genuinely returns memory, and the honest idle figure is ~150 MB (ONNX Runtime itself
-  stays resident — it is a singleton and cannot be unloaded).
+- `release()` genuinely returns memory, and the honest idle figure is ~150 MB of allocator arenas
+  (ONNX Runtime is a singleton that cannot be unloaded, but it only accounts for ~10 MB of that).
 - Lock around synthesis: kept, but as insurance rather than a fix.
 - Streaming: implementable later by stripping the 44-byte header; not v1.
